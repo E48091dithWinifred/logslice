@@ -1,56 +1,58 @@
-"""Aggregate parsed log records into a structured JSON summary."""
+"""Aggregation utilities for logslice parsed log entries."""
 
-from collections import Counter
-from typing import Any
+from collections import Counter, defaultdict
+from typing import Iterable
 
 
-def summarize(records: list[dict]) -> dict[str, Any]:
-    """Produce a summary dict from a list of parsed log records.
+def summarize(entries: Iterable[dict]) -> dict:
+    """Produce a structured JSON-serialisable summary from an iterable of
+    parsed log entry dicts.
 
-    Summary includes:
-    - total request count
-    - status code distribution
-    - top 10 requested paths
-    - top 10 remote addresses
-    - total bytes transferred
-    - average bytes per request
+    Works with both nginx and apache parsed entries as they share common
+    field names (status, method, path, remote_addr, body_bytes_sent).
     """
-    if not records:
-        return {
-            "total_requests": 0,
-            "status_distribution": {},
-            "top_paths": [],
-            "top_remote_addrs": [],
-            "total_bytes": 0,
-            "avg_bytes_per_request": 0.0,
-        }
-
-    status_counter: Counter = Counter()
-    path_counter: Counter = Counter()
-    addr_counter: Counter = Counter()
+    total = 0
+    status_counts: Counter = Counter()
+    method_counts: Counter = Counter()
+    path_counts: Counter = Counter()
+    ip_counts: Counter = Counter()
     total_bytes = 0
+    error_count = 0  # 4xx + 5xx
 
-    for record in records:
-        status_counter[str(record.get("status", "unknown"))] += 1
-        path = record.get("path", "")
+    for entry in entries:
+        total += 1
+
+        status = entry.get("status")
+        if status is not None:
+            status_counts[str(status)] += 1
+            if status >= 400:
+                error_count += 1
+
+        method = entry.get("method")
+        if method:
+            method_counts[method] += 1
+
+        path = entry.get("path")
         if path:
-            path_counter[path] += 1
-        addr = record.get("remote_addr", "")
-        if addr:
-            addr_counter[addr] += 1
-        total_bytes += record.get("body_bytes_sent", 0)
+            path_counts[path] += 1
 
-    total = len(records)
+        remote_addr = entry.get("remote_addr")
+        if remote_addr:
+            ip_counts[remote_addr] += 1
+
+        bytes_sent = entry.get("body_bytes_sent", 0) or 0
+        total_bytes += bytes_sent
+
+    top_paths = [p for p, _ in path_counts.most_common(10)]
+    top_ips = [ip for ip, _ in ip_counts.most_common(10)]
 
     return {
         "total_requests": total,
-        "status_distribution": dict(status_counter.most_common()),
-        "top_paths": [
-            {"path": p, "count": c} for p, c in path_counter.most_common(10)
-        ],
-        "top_remote_addrs": [
-            {"addr": a, "count": c} for a, c in addr_counter.most_common(10)
-        ],
-        "total_bytes": total_bytes,
-        "avg_bytes_per_request": round(total_bytes / total, 2),
+        "total_bytes_sent": total_bytes,
+        "error_count": error_count,
+        "error_rate": round(error_count / total, 4) if total > 0 else 0.0,
+        "status_counts": dict(status_counts),
+        "method_counts": dict(method_counts),
+        "top_paths": top_paths,
+        "top_ips": top_ips,
     }
